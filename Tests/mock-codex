@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+import json, os, sys, time
+mode = os.environ.get('PROVIDER_TEST_MODE', 'modern')
+with open(os.path.join(os.path.dirname(__file__), 'mock.pid'), 'w') as f:
+    f.write(str(os.getpid()))
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg['method']
+    if method == 'initialize':
+        print(json.dumps({'id':msg['id'], 'result':{}}), flush=True)
+    elif method == 'initialized':
+        pass
+    elif method == 'account/rateLimits/read':
+        if mode == 'hang':
+            time.sleep(60)
+        elif mode == 'exit':
+            sys.exit(0)
+        elif mode == 'error':
+            print(json.dumps({'id':msg['id'], 'error': {'message': 'SECRET_MUST_NOT_LEAK'}}), flush=True)
+        else:
+            bucket = {'planType':'pro', 'primary': {'usedPercent':42, 'windowDurationMins':10080, 'resetsAt':1900000000}, 'secondary': {'usedPercent':12, 'windowDurationMins':300, 'resetsAt':None}}
+            if mode == 'bad': bucket['primary']['usedPercent'] = True
+            result = {'rateLimits':bucket} if mode == 'legacy' else {'rateLimitsByLimitId': {'codex':bucket}, 'rateLimits':{'primary':{'usedPercent':99}}}
+            print(json.dumps({'method':'notification', 'params':{}}), flush=True)
+            line = json.dumps({'id':msg['id'], 'result':result}) + '\n'
+            sys.stdout.write(line[:17]); sys.stdout.flush()
+            time.sleep(.02)
+            sys.stdout.write(line[17:]); sys.stdout.flush()
+    else:
+        raise RuntimeError('Unexpected RPC')

@@ -1,0 +1,63 @@
+name: Test and build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: macOS · ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Verify toolchain and architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          swift --version
+          python3 --version
+
+      - name: Run fixture and state tests
+        run: ./test.sh
+
+      - name: Build and verify app signature
+        run: ./build.sh
+
+      - name: Package app
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          lipo ../AgentsPanel.app/Contents/MacOS/AgentsPanel -verify_arch "$BUILD_ARCH"
+          ditto -c -k --sequesterRsrc --keepParent ../AgentsPanel.app "$RUNNER_TEMP/artifacts/AgentsPanel-macos-$BUILD_ARCH.zip"
+
+      - name: Upload app archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: AgentsPanel-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/artifacts/AgentsPanel-macos-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
