@@ -38,7 +38,7 @@ private enum TokenHistoryParser {
     typealias Object = [String: Any]
 
     private struct Sample {
-        let keys: [String]
+        var keys: [String]
         let date: Date
         let model: String
         var tokens: Int
@@ -46,9 +46,13 @@ private enum TokenHistoryParser {
     }
 
     private struct CounterRange {
-        let scope: String
-        let lower: Int
+        var scope: String
+        let session: String
+        let resetAt: Date?
+        let previousAt: Date?
+        var lower: Int
         let upper: Int
+        var requiresReset = false
     }
 
     private struct CachedFile {
@@ -132,6 +136,31 @@ private enum TokenHistoryParser {
         }
         caches[scope] = nextCache
 
+        // A partial copy may begin after a reset and never observe the drop.
+        // Share known reset boundaries across all copies of the same session.
+        var resets: [String: Set<Date>] = [:]
+        for sample in all {
+            if let counter = sample.counter, let reset = counter.resetAt {
+                resets[counter.session, default: []].insert(reset)
+            }
+        }
+        let boundaries = resets.mapValues { $0.sorted() }
+        for index in all.indices {
+            guard var counter = all[index].counter else { continue }
+            let reset = boundaries[counter.session]?.last { $0 <= all[index].date }
+            if let reset, let previous = counter.previousAt, previous < reset {
+                // The prior counter belongs to the preceding epoch. A copy
+                // missing the reset row must not subtract that old baseline.
+                counter.lower = 0
+                counter.requiresReset = false
+            }
+            let epoch = reset.map { String($0.timeIntervalSince1970) } ?? "initial"
+            counter.scope = counter.session + ":" + epoch
+            all[index].counter = counter
+            all[index].keys[0] = "counter:" + counter.scope + ":" + String(counter.upper)
+        }
+        all.removeAll { $0.counter?.requiresReset == true }
+
         // Reconcile overlapping counter intervals across session copies before
         // deduplicating aliases or filtering days. Earlier endpoints preserve the
         // finer day/model attribution from the most complete available history.
@@ -205,6 +234,7 @@ private enum TokenHistoryParser {
         var session = file.path
         var model = "Unknown"
         var previous = 0
+        var previousAt: Date?
         var epoch = "initial"
         var seen = Set<String>()
         lines(file) { data, lineNumber in
@@ -236,7 +266,7 @@ private enum TokenHistoryParser {
             guard let payload = object["payload"] as? Object else { return }
             if type == "session_meta" {
                 let id = nonempty(payload["session_id"]) ?? nonempty(payload["id"]) ?? session
-                if id != session { previous = 0; epoch = "initial"; seen.removeAll(); model = "Unknown" }
+                if id != session { previous = 0; previousAt = nil; epoch = "initial"; seen.removeAll(); model = "Unknown" }
                 session = id
                 if let name = nonempty(payload["model"]) { model = name }
                 return
@@ -269,18 +299,25 @@ private enum TokenHistoryParser {
             var counter: CounterRange?
             var keys: [String]
             if let current = cumulative {
-                if current < previous {
+                let unresolvedDrop = current < previous && current != last
+                if current < previous && !unresolvedDrop {
                     // Observed local counter resets start at the last request's usage.
-                    // Ignore unexplained regressions rather than inventing new usage.
-                    guard current == last else { return }
                     epoch = stamp
                     previous = 0
                 }
                 // A truncated/imported session may begin with a lifetime counter.
                 // With no earlier baseline, attribute only its last known request.
-                tokens = previous == 0 ? min(current, last ?? current) : current - previous
-                counter = CounterRange(scope: session + ":" + epoch, lower: current - tokens, upper: current)
-                previous = current
+                tokens = unresolvedDrop ? 0 : (previous == 0 ? min(current, last ?? current) : current - previous)
+                counter = CounterRange(scope: session + ":" + epoch, session: session,
+                                       resetAt: epoch == "initial" ? nil : date(epoch),
+                                       previousAt: previousAt,
+                                       lower: current - tokens, upper: current, requiresReset: unresolvedDrop)
+                // An unexplained drop is usable only if another copy supplies
+                // the missing reset. Do not change this file's baseline yet.
+                if !unresolvedDrop {
+                    previous = current
+                    previousAt = date(object["timestamp"])
+                }
                 keys = ["counter:" + session + ":" + epoch + ":" + String(current)]
             } else {
                 guard let usage = last else { return }
@@ -290,7 +327,7 @@ private enum TokenHistoryParser {
             if let id = responseID { keys.append("response:" + id) }
             // Read counters even outside the date range (or without a valid date)
             // to establish the baseline before attributing subsequent increments.
-            guard tokens > 0, let timestamp = date(object["timestamp"]) else { return }
+            guard tokens > 0 || counter != nil, let timestamp = date(object["timestamp"]) else { return }
             samples.append(Sample(keys: keys, date: timestamp,
                                   model: nonempty(payload["model"]) ?? model, tokens: tokens, counter: counter))
         }
