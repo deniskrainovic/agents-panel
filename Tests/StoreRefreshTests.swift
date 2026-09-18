@@ -5,6 +5,14 @@ private actor AuthenticationGate {
     func wait() async { await withCheckedContinuation { waiters.append($0) } }
     func release() { for waiter in waiters { waiter.resume() }; waiters.removeAll() }
 }
+private actor RenewableLogin {
+    var expired = false
+    func setExpired(_ value: Bool) { expired = value }
+    func fetch() throws -> Subscription {
+        if expired { throw ProviderError.authentication("Renew your login in Claude Code, then refresh.") }
+        return Subscription(plan: "Subscription", windows: [], updatedAt: Date(), source: "Fixture")
+    }
+}
 private final class HistoryFixture: @unchecked Sendable {
     private let lock = NSLock()
     private var counts: [String: Int] = [:]
@@ -44,5 +52,20 @@ private final class HistoryFixture: @unchecked Sendable {
         await gate.release()
         guard await eventually({ store.loading.isEmpty }) else { fatalError("Provider completion failed") }
         print("PASS: local histories refresh while authentication is pending")
+        let login = RenewableLogin()
+        let recovery = Store(fetchSubscription: { _ in try await login.fetch() }, readHistory: { fixture.scan($0) })
+        recovery.refresh()
+        guard await eventually({ recovery.loading.isEmpty && recovery.historyLoading.isEmpty }) else { fatalError("Initial login failed") }
+        precondition(recovery.subscriptions[.claude] != nil)
+        await login.setExpired(true)
+        recovery.refresh()
+        guard await eventually({ recovery.loading.isEmpty && recovery.historyLoading.isEmpty }) else { fatalError("Expiry did not complete") }
+        precondition(recovery.errors[.claude] != nil && recovery.subscriptions[.claude] != nil)
+        precondition(recovery.histories[.claude]?.days.first?.tokens == 4)
+        await login.setExpired(false)
+        recovery.refresh()
+        guard await eventually({ recovery.loading.isEmpty && recovery.historyLoading.isEmpty }) else { fatalError("Renewal did not complete") }
+        precondition(recovery.errors[.claude] == nil && recovery.subscriptions[.claude] != nil)
+        print("PASS: expired login retains previous data, local history updates, and renewed login clears the error")
     }
 }

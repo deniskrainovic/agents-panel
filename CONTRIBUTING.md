@@ -10,7 +10,7 @@ From the repository root:
 open ../AgentsPanel.app
 ```
 
-The build creates an app for the current Mac's architecture. Drag it into Applications to install it. Builds are ad-hoc signed, not notarized by Apple; macOS may require approval to open them. Updating the app may prompt again for Claude Keychain access.
+The build creates an app for the current Mac's architecture. Drag it into Applications to install it. Builds are ad-hoc signed, not notarized by Apple; macOS may require approval to open them. Subscription limits use your installed, signed-in Codex and Claude Code CLIs. AgentsPanel does not read Claude credentials. Claude Code must support the structured `/usage` report and `--safe-mode`; this integration was verified with version 2.1.276. If a login expires, renew it in the CLI and refresh AgentsPanel.
 
 Tests use synthetic usage records and mock processes. They do not require Codex, Claude, accounts, API keys, or signing secrets. `swift test` is not this project's test entry point.
 

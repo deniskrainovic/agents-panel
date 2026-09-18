@@ -6,10 +6,12 @@ Read when changing `Sources/Providers.swift` or `Sources/TokenHistory.swift`.
 
 - Codex uses the installed app-server and `account/rateLimits/read`. Monitoring must not create a thread or start a model turn.
 - Prefer the Codex entry in `rateLimitsByLimitId`, with the legacy response as fallback. Determine window labels from their duration; the primary window can be weekly.
-- Claude uses its existing OAuth login from the `Claude Code-credentials` Keychain item, with the credentials-file fallback implemented in `Providers.swift`.
-- Preserve read-only credential handling: do not rename Claude’s Keychain item, rotate its refresh token, or change its access controls as part of fetching usage.
-- Keep credential values and raw credential-bearing responses out of logs, fixtures, screenshots, and error messages. Use synthetic credentials in tests.
-- Send Claude credentials only to the provider’s HTTPS endpoint; retain redirect rejection, request timeouts, and Codex child-process cleanup.
+- Claude runs the installed CLI with `--safe-mode --no-session-persistence -p "/usage" --output-format json`. Parse `usage_report.rate_limits.limits` from the built-in command result; never prompt the model to estimate usage or parse session cost as subscription limits.
+- Claude Code owns authentication. AgentsPanel must not read Keychain items, credential files, or OAuth tokens, refresh tokens, or call the Claude usage endpoint directly.
+- Run Claude in a temporary directory with hooks/plugins disabled and session persistence off. Preserve cancellation, output bounds, the 25-second deadline, and child-process cleanup for both providers.
+- Do not display raw CLI diagnostics or store full usage reports: they may contain account metadata or local activity details. Tests use synthetic CLI output.
+- Require a built-in usage result with zero model turns and zero inference time. Missing or unsupported structured reports require a clear error; no model-prompt fallback.
+- The report supplies session, weekly, and model-specific limits, but no plan tier; display "Subscription" rather than guessing the account plan.
 - Unavailable or failed usage is not zero usage. Show the error and identify any retained values as a previous successful update.
 
 ## Local history

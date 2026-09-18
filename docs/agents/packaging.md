@@ -8,7 +8,7 @@ Read when changing `build.sh`, bundle metadata, signing, deliverables, or the RE
 - Keep the app and bundled executable named `AgentsPanel` so system prompts use a recognizable name. The SwiftPM product remains `AgentsPanel`.
 - Keep bundle identifier `local.agentpanel.mac` stable across updates unless intentionally migrating app identity.
 - The current signing policy is ad-hoc (`codesign --sign -`). The user tried persistent self-signing and explicitly chose to remove it. Do not recreate the certificate or its trust settings as routine setup.
-- Do not describe local builds as Apple verified or notarized. Keychain access can require approval again after an update.
+- Do not describe local builds as Apple verified or notarized. Claude Code handles its own authentication; AgentsPanel must not request direct access to its credentials.
 - The package targets macOS 13+. The current build is for the host architecture; do not advertise a universal binary without building and checking both architectures.
 - Stop the running app before replacing it. Allow it to exit before reopening; an immediate launch while it is terminating can fail.
 

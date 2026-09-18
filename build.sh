@@ -18,8 +18,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>AgentsPanel</string>
 <key>CFBundleDisplayName</key><string>AgentsPanel</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.8</string>
-<key>CFBundleVersion</key><string>11</string>
+<key>CFBundleShortVersionString</key><string>1.0.9</string>
+<key>CFBundleVersion</key><string>12</string>
 <key>CFBundleIconFile</key><string>AgentsPanel</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>

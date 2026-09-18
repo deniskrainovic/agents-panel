@@ -1,5 +1,4 @@
 import Foundation
-import Security
 import Darwin
 
 struct UsageWindow: Codable {
@@ -19,27 +18,16 @@ enum ProviderError: LocalizedError {
     case unsupported(String)
     case unavailable(String)
     case authentication(String)
-    case keychain(OSStatus)
     case timeout(String)
     case transport(String)
     case invalidResponse(String)
-    case http(Int)
 
     var errorDescription: String? {
         switch self {
         case .unsupported(let name): return "Unsupported provider: \(name). Choose codex or claude."
         case .unavailable(let message), .authentication(let message),
              .transport(let message), .invalidResponse(let message): return message
-        case .keychain(let status):
-            return "Claude Keychain access failed (\(status)). Unlock your login Keychain and allow AgentsPanel to read Claude Code-credentials, or sign in with claude auth login."
         case .timeout(let provider): return "\(provider) usage request timed out after 25 seconds. Check your connection and try again."
-        case .http(let code):
-            switch code {
-            case 401: return "Claude credentials expired or were rejected. Run claude auth login, then retry."
-            case 403: return "Claude usage access was denied. Sign in with claude auth login using a Claude subscription account."
-            case 429: return "Claude is rate limiting usage checks. Wait a few minutes before retrying."
-            default: return "Claude usage returned HTTP \(code). Check Anthropic service status and retry later."
-            }
         }
     }
 }
@@ -47,17 +35,18 @@ enum ProviderError: LocalizedError {
 enum Providers {
     static func fetch(_ provider: String) async throws -> Subscription {
         try Task.checkCancellation()
-        switch provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "codex":
+        let name = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch name {
+        case "codex", "claude":
+            let isClaude = name == "claude"
             let cancellation = ProviderCancellation()
             return try await withTaskCancellationHandler(operation: {
                 try await withCheckedThrowingContinuation { continuation in
                     DispatchQueue.global(qos: .utility).async {
-                        continuation.resume(with: Result { try fetchCodex(cancellation) })
+                        continuation.resume(with: Result { try isClaude ? ClaudeCLI.fetch(cancellation) : fetchCodex(cancellation) })
                     }
                 }
             }, onCancel: { cancellation.cancel() })
-        case "claude": return try await fetchClaude()
         default: throw ProviderError.unsupported(provider)
         }
     }
@@ -221,111 +210,6 @@ enum Providers {
         return Subscription(plan: nonempty(bucket["planType"]) ?? "Unknown plan", windows: windows, updatedAt: Date(), source: "Codex app-server")
     }
 
-    // Endpoint/header and credential metadata verified against basecamp/omarchy:
-    // https://github.com/basecamp/omarchy/blob/quattro/bin/omarchy-agent-usage-claude
-    private static func fetchClaude() async throws -> Subscription {
-        // Security may show the native Keychain permission prompt. Keep it off the UI thread.
-        let credentials: [String: Any] = try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                continuation.resume(with: Result { try claudeCredentials() })
-            }
-        }
-        try Task.checkCancellation()
-        guard let token = nonempty(credentials["accessToken"]),
-              !token.contains("\r"), !token.contains("\n") else {
-            throw ProviderError.authentication("Claude OAuth access token is missing. Run claude auth login and retry.")
-        }
-        if let expires = number(credentials["expiresAt"]), expires / 1000 <= Date().timeIntervalSince1970 {
-            throw ProviderError.authentication("Claude OAuth credentials have expired. Run claude auth login and retry. AgentsPanel does not refresh tokens.")
-        }
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 25
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 25
-        configuration.timeoutIntervalForResource = 25
-        configuration.httpShouldSetCookies = false
-        configuration.urlCache = nil
-        let session = URLSession(configuration: configuration, delegate: ProviderNoRedirect(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        let data: Data
-        let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
-        catch {
-            if Task.isCancelled { throw CancellationError() }
-            if (error as? URLError)?.code == .timedOut { throw ProviderError.timeout("Claude") }
-            throw ProviderError.transport("Cannot reach Claude usage. Check your internet connection, VPN, and firewall, then retry.")
-        }
-        try Task.checkCancellation()
-        guard let http = response as? HTTPURLResponse else { throw ProviderError.invalidResponse("Claude returned no HTTP response. Retry later.") }
-        guard http.statusCode == 200 else { throw ProviderError.http(http.statusCode) }
-        guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ProviderError.invalidResponse("Claude returned invalid usage data. Retry later or update AgentsPanel.")
-        }
-        return try parseClaudeUsage(payload, credentials: credentials)
-    }
-
-    private static func parseClaudeUsage(_ payload: [String: Any], credentials: [String: Any]) throws -> Subscription {
-        var windows: [UsageWindow] = []
-        let weeklyKey = payload["seven_day_oauth_apps"] is [String: Any] ? "seven_day_oauth_apps" : "seven_day"
-        var keys = [("five_hour", "5-hour session"), (weeklyKey, "Weekly")]
-        keys += payload.keys.sorted().filter { $0.hasPrefix("seven_day_") && $0 != "seven_day_oauth_apps" && $0 != "seven_day_breakdown" }
-            .map { ($0, "Weekly · " + $0.replacingOccurrences(of: "seven_day_", with: "").replacingOccurrences(of: "_", with: " ").capitalized) }
-        for (key, name) in keys {
-            guard let value = payload[key], !(value is NSNull) else { continue }
-            guard let bucket = value as? [String: Any], let used = number(bucket["utilization"]), used >= 0 else {
-                throw ProviderError.invalidResponse("Claude returned an invalid usage window. Retry later or update AgentsPanel.")
-            }
-            windows.append(UsageWindow(name: name, usedPercent: used, resetsAt: try isoReset(bucket["resets_at"])))
-        }
-        if let entries = payload["limits"] as? [[String: Any]] {
-            for entry in entries {
-                guard let scope = entry["scope"] as? [String: Any], let model = scope["model"] as? [String: Any],
-                      let modelName = nonempty(model["display_name"]) ?? nonempty(model["id"]) else { continue }
-                guard let used = number(entry["percent"]), used >= 0 else {
-                    throw ProviderError.invalidResponse("Claude returned invalid model usage. Retry later or update AgentsPanel.")
-                }
-                let kind = nonempty(entry["kind"]) ?? "usage"
-                let period = kind.contains("week") ? "Weekly" : kind.contains("hour") || kind.contains("session") ? "Session" : kind.replacingOccurrences(of: "_", with: " ").capitalized
-                let name = "\(period) · \(modelName)"
-                if !windows.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-                    windows.append(UsageWindow(name: name, usedPercent: used, resetsAt: try isoReset(entry["resets_at"])))
-                }
-            }
-        }
-        guard !windows.isEmpty else { throw ProviderError.unavailable("Claude returned no subscription usage windows. Check the account signed in with claude auth login.") }
-        let tier = nonempty(credentials["rateLimitTier"])
-        var plan = nonempty(credentials["subscriptionType"])?.capitalized ?? tier ?? "Unknown plan"
-        if let tier = tier, let range = tier.range(of: "max_[0-9]+x", options: [.regularExpression, .caseInsensitive]) {
-            plan = String(tier[range]).replacingOccurrences(of: "_", with: " ").capitalized
-        }
-        return Subscription(plan: plan, windows: windows, updatedAt: Date(), source: "Claude OAuth usage")
-    }
-
-    private static func claudeCredentials() throws -> [String: Any] {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        func oauth(_ data: Data) -> [String: Any]? {
-            guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let auth = root["claudeAiOauth"] as? [String: Any], nonempty(auth["accessToken"]) != nil else { return nil }
-            return auth
-        }
-        if status == errSecSuccess, let data = item as? Data, let auth = oauth(data) { return auth }
-        let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/.credentials.json")
-        if let data = try? Data(contentsOf: file), let auth = oauth(data) { return auth }
-        if status != errSecSuccess && status != errSecItemNotFound { throw ProviderError.keychain(status) }
-        throw ProviderError.authentication("No readable Claude OAuth credentials were found in Keychain or ~/.claude/.credentials.json. Run claude auth login and allow Keychain access when prompted.")
-    }
-
     private static func nonempty(_ value: Any?) -> String? {
         guard let value = value as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return value
@@ -341,35 +225,14 @@ enum Providers {
         guard let seconds = number(value), seconds >= 0 else { throw ProviderError.invalidResponse("Codex returned an invalid reset date. Update Codex and retry.") }
         return Date(timeIntervalSince1970: seconds)
     }
-
-    private static func isoReset(_ value: Any?) throws -> Date? {
-        guard let value = value, !(value is NSNull) else { return nil }
-        guard let text = value as? String else { throw ProviderError.invalidResponse("Claude returned an invalid reset date. Retry later.") }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: text) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        guard let date = formatter.date(from: text) else { throw ProviderError.invalidResponse("Claude returned an invalid reset date. Retry later.") }
-        return date
-    }
 }
 
-private final class ProviderCancellation: @unchecked Sendable {
+final class ProviderCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
     func cancel() { lock.lock(); cancelled = true; lock.unlock() }
     func check() throws {
         lock.lock(); let value = cancelled; lock.unlock()
         if value { throw CancellationError() }
-    }
-}
-
-// Never forward the OAuth header to a redirect destination.
-private final class ProviderNoRedirect: NSObject, URLSessionTaskDelegate {
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest,
-                    completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
     }
 }

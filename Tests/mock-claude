@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+import json, os, signal, subprocess, sys, time
+mode = os.environ.get("CLAUDE_TEST_MODE", "valid")
+with open(os.path.join(os.path.dirname(__file__), "claude.pid"), "w") as f:
+    f.write(str(os.getpid()))
+if mode in ("wrapper", "wrapper-exit"):
+    child_code = 'import os,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], "w").write(str(os.getpid())); time.sleep(60)'
+    subprocess.Popen([sys.executable, '-c', child_code, os.path.join(os.path.dirname(__file__), 'claude-child.pid')])
+    if mode == "wrapper-exit": sys.exit(0)
+    time.sleep(60)
+if mode == "hang":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(60)
+if mode == "exit":
+    print("SECRET_MUST_NOT_LEAK", file=sys.stderr)
+    sys.exit(1)
+if mode == "broken":
+    print("SECRET_MUST_NOT_LEAK")
+    sys.exit(0)
+if mode == "oversized":
+    print("x" * (5 * 1024 * 1024))
+    sys.exit(0)
+assert sys.argv[1:] == ['--safe-mode', '--no-session-persistence', '-p', '/usage', '--output-format', 'json']
+limits = [
+    {'kind':'session', 'percent':1.5, 'resets_at':'2026-09-19T01:00:00.040617+00:00', 'scope':None},
+    {'kind':'weekly_all', 'percent':32, 'resets_at':'2026-09-21T10:59:59Z', 'scope':None},
+    {'kind':'weekly_scoped', 'percent':55, 'resets_at':'2026-09-21T10:59:59Z', 'scope':{'model':{'display_name':'Fable'}}}
+]
+if mode == "missing": limits = []
+if mode == "boolean": limits[0]['percent'] = True
+if mode == "bad-date": limits[0]['resets_at'] = 'not-a-date'
+if mode == "null-date": limits[0]['resets_at'] = None
+print(json.dumps([
+    {'type':'assistant', 'local_command_run':{'command':'usage'}, 'usage_report':{'rate_limits':{'limits':limits}}},
+    {'type':'result', 'local_command':'usage', 'is_error':mode == 'expired', 'num_turns':1 if mode == 'inference' else 0, 'duration_api_ms':0, 'result':'SECRET_MUST_NOT_LEAK'}
+]))

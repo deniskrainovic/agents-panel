@@ -18,25 +18,57 @@ import Darwin
             }
             print("PASS \(mode)")
         }
-        let fixture: [String: Any] = [
-            "five_hour": ["utilization": 0.5, "resets_at": "2026-09-18T12:00:00.123Z"],
-            "seven_day": ["utilization": 37, "resets_at": "2026-09-19T12:00:00Z"],
-            "seven_day_oauth_apps": NSNull(),
-            "seven_day_breakdown": ["rows": [], "as_of": "2026-09-17T12:00:00Z"],
-            "seven_day_opus": NSNull(),
-            "limits": [["scope": ["model": ["display_name": "Fable"]], "kind": "weekly_scoped", "percent": 15, "resets_at": NSNull()]]
-        ]
-        let claude = try Providers.parseClaudeUsage(fixture, credentials: ["subscriptionType": "max", "rateLimitTier": "default_claude_max_5x"])
-        precondition(claude.plan == "Max 5X")
-        precondition(claude.windows.count == 3)
-        precondition(claude.windows[0].name == "5-hour session" && claude.windows[0].usedPercent == 0.5)
-        precondition(claude.windows[0].resetsAt != nil && claude.windows[1].resetsAt != nil)
-        precondition(claude.windows[2].name == "Weekly · Fable")
-        do {
-            _ = try Providers.parseClaudeUsage([:], credentials: [:])
-            fatalError("Missing usage must not become zero")
-        } catch ProviderError.unavailable { }
-        print("PASS Claude schema, nulls, dates, metadata, scoped limits, fractional percentages")
+        let claude = try await Providers.fetch("claude")
+        precondition(claude.source == "Claude Code CLI")
+        precondition(claude.windows.map(\.name) == ["5-hour session", "Weekly", "Weekly · Fable"])
+        precondition(claude.windows.map(\.usedPercent) == [1.5, 32, 55])
+        precondition(claude.windows.allSatisfy { $0.resetsAt != nil })
+        print("PASS Claude CLI subscription windows")
+        for mode in ["expired", "exit", "missing", "boolean", "bad-date", "broken", "inference", "oversized"] {
+            setenv("CLAUDE_TEST_MODE", mode, 1)
+            do { _ = try await Providers.fetch("claude"); fatalError("Accepted invalid Claude output: \(mode)") }
+            catch { precondition(!error.localizedDescription.contains("SECRET")) }
+        }
+        setenv("CLAUDE_TEST_MODE", "null-date", 1)
+        let noReset = try await Providers.fetch("claude")
+        precondition(noReset.windows.first?.resetsAt == nil)
+        setenv("CLAUDE_TEST_MODE", "valid", 1)
+        let recovered = try await Providers.fetch("claude")
+        precondition(recovered.windows.count == 3)
+        print("PASS Claude errors, missing limits, malformed output, null resets, safe errors, and recovery")
+        for mode in ["wrapper", "wrapper-exit"] {
+            try? FileManager.default.removeItem(atPath: "claude-child.pid")
+            setenv("CLAUDE_TEST_MODE", mode, 1)
+            let wrapperTask = Task { try await Providers.fetch("claude") }
+            for _ in 0..<2000 {
+                if FileManager.default.fileExists(atPath: "claude-child.pid") { break }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            wrapperTask.cancel()
+            do { _ = try await wrapperTask.value; fatalError("Wrapper cancellation failed") }
+            catch is CancellationError { }
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let descendant = Int32(try String(contentsOfFile: "claude-child.pid"))!
+            let leaked = kill(descendant, 0) == 0
+            if leaked { kill(descendant, SIGKILL) }
+            precondition(!leaked, "Cancelling Claude left its worker process running")
+        }
+        print("PASS Claude wrapper descendant cleanup")
+        setenv("CLAUDE_TEST_MODE", "hang", 1)
+        let claudeTask = Task { try await Providers.fetch("claude") }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        claudeTask.cancel()
+        do { _ = try await claudeTask.value; fatalError("Claude cancellation failed") }
+        catch is CancellationError { }
+        let claudeDeadline = Date()
+        do { _ = try await Providers.fetch("claude"); fatalError("Claude timeout failed") }
+        catch ProviderError.timeout { }
+        precondition(Date().timeIntervalSince(claudeDeadline) >= 25)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let claudePID = Int32(try String(contentsOfFile: "claude.pid"))!
+        precondition(kill(claudePID, 0) == -1 && errno == ESRCH)
+        print("PASS Claude cancellation, deadline, and forced process cleanup")
+
         setenv("PROVIDER_TEST_MODE", "hang", 1)
         let start = Date()
         let task = Task { try await Providers.fetch("codex") }
