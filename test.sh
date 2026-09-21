@@ -7,8 +7,12 @@ if [[ "${1:-}" == "--ui" ]]; then
   .build/tests/switch-responsiveness-tests
   exit 0
 fi
+swiftc -swift-version 5 -O -gnone -module-cache-path "$PWD/.build/test-module-cache" Sources/Updates.swift Tests/UpdateTests.swift -o .build/tests/update-tests
+.build/tests/update-tests
 swiftc -swift-version 5 -O -module-cache-path "$PWD/.build/test-module-cache" Sources/TokenHistory.swift Tests/TokenHistoryTests.swift -o .build/tests/token-history-tests
 .build/tests/token-history-tests
 swiftc -swift-version 5 -O -gnone -D PANEL_TESTING -module-cache-path "$PWD/.build/test-module-cache" Sources/*.swift Tests/StoreRefreshTests.swift -o .build/tests/store-refresh-tests
 .build/tests/store-refresh-tests
+swiftc -swift-version 5 -O -gnone -D PANEL_TESTING -module-cache-path "$PWD/.build/test-module-cache" Sources/*.swift Tests/LoginItemTests.swift -o .build/tests/login-item-tests
+.build/tests/login-item-tests
 python3 Tests/run-provider-tests.py

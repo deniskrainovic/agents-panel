@@ -11,7 +11,9 @@ import SwiftUI
 
     @MainActor static func run() async {
         let probe = SlowLoginStatus()
-        let store = Store(readLoginStatus: { probe.read() })
+        let updates = UpdateChecker(fetch: { AppUpdate(tag: "v1.0.10") })
+        await updates.checkIfDue()
+        let store = Store(readLoginStatus: { probe.read() }, updates: updates)
         store.refreshLoginStatus()
         store.refreshLoginStatus()
         for agent in Agent.allCases {

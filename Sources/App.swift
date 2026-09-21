@@ -14,14 +14,23 @@ enum Agent: String, CaseIterable, Identifiable {
     private let fetchSubscription: @Sendable (String) async throws -> Subscription
     private let readHistory: @Sendable (String) -> TokenHistory
     private let readLoginStatus: @Sendable () -> Bool
+    private let setLoginStatus: @Sendable (Bool) throws -> Bool
+    private let loginDefaults: UserDefaults
+    let updates: UpdateChecker
     @Published private(set) var launchAtLoginEnabled: Bool?
     @Published private(set) var loginItemBusy = false
     init(readLoginStatus: @escaping @Sendable () -> Bool = { LoginItemAccess.isEnabled() },
+         setLoginStatus: @escaping @Sendable (Bool) throws -> Bool = { try LoginItemAccess.setEnabled($0) },
+         loginDefaults: UserDefaults = .standard,
          fetchSubscription: @escaping @Sendable (String) async throws -> Subscription = { try await Providers.fetch($0) },
-         readHistory: @escaping @Sendable (String) -> TokenHistory = { TokenHistory.load(provider: $0) }) {
+         readHistory: @escaping @Sendable (String) -> TokenHistory = { TokenHistory.load(provider: $0) },
+         updates: UpdateChecker? = nil) {
         self.fetchSubscription = fetchSubscription
         self.readHistory = readHistory
         self.readLoginStatus = readLoginStatus
+        self.setLoginStatus = setLoginStatus
+        self.loginDefaults = loginDefaults
+        self.updates = updates ?? UpdateChecker()
     }
     @Published var selected = Agent(rawValue: UserDefaults.standard.string(forKey: "selected") ?? "codex") ?? .codex {
         didSet { UserDefaults.standard.set(selected.rawValue, forKey: "selected") }
@@ -34,10 +43,16 @@ enum Agent: String, CaseIterable, Identifiable {
     @Published var settingsError: String?
     private var timer: Timer?
     func start() {
-        refreshLoginStatus()
+        updates.start()
+        refreshLoginStatus(enableByDefault: true)
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 900, repeats: true) { [weak self] _ in Task { @MainActor in self?.refresh() } }
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.refresh() } }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.refresh()
+                await self?.updates.checkIfDue()
+            }
+        }
     }
     func refresh() {
         for agent in Agent.allCases {
@@ -60,23 +75,40 @@ enum Agent: String, CaseIterable, Identifiable {
             }
         }
     }
-    func refreshLoginStatus() {
+    private static let loginPreferenceKey = "launchAtLoginPreference"
+    private static let loginApprovalMessage = "Allow AgentsPanel in System Settings → General → Login Items to finish enabling launch at login."
+
+    func refreshLoginStatus(enableByDefault: Bool = false) {
         guard !loginItemBusy else { return }
         loginItemBusy = true
         let read = readLoginStatus
+        let write = setLoginStatus
+        let initialize = enableByDefault && loginDefaults.object(forKey: Self.loginPreferenceKey) == nil
         Task {
-            launchAtLoginEnabled = await Task.detached(priority: .utility) { read() }.value
+            let enabled = await Task.detached(priority: .utility) { read() }.value
+            launchAtLoginEnabled = enabled
+            if initialize {
+                do {
+                    if !enabled {
+                        launchAtLoginEnabled = try await Task.detached(priority: .utility) { try write(true) }.value
+                    }
+                    loginDefaults.set(true, forKey: Self.loginPreferenceKey)
+                    if launchAtLoginEnabled != true { settingsError = Self.loginApprovalMessage }
+                } catch { settingsError = error.localizedDescription }
+            }
             loginItemBusy = false
         }
     }
     func launchAtLogin() {
         guard let enabled = launchAtLoginEnabled, !loginItemBusy else { return }
         loginItemBusy = true
+        let write = setLoginStatus
+        let requested = !enabled
         Task {
             do {
-                launchAtLoginEnabled = try await Task.detached(priority: .utility) {
-                    try LoginItemAccess.setEnabled(!enabled)
-                }.value
+                launchAtLoginEnabled = try await Task.detached(priority: .utility) { try write(requested) }.value
+                loginDefaults.set(requested, forKey: Self.loginPreferenceKey)
+                settingsError = requested && launchAtLoginEnabled != true ? Self.loginApprovalMessage : nil
             } catch { settingsError = error.localizedDescription }
             loginItemBusy = false
         }
@@ -195,6 +227,7 @@ struct Panel: View {
                 else if let date = subscription?.updatedAt { Text("Updated \(date.formatted(date: .omitted, time: .shortened))") }
                 else { Text("Refreshes every 15 minutes") }
                 Spacer()
+                UpdateNotice(checker: store.updates)
                 Menu {
                     Button("Open \(agent.title) usage", action: store.openUsage)
                     Button(store.launchAtLoginEnabled == nil ? "Checking launch at login…" : (store.launchAtLoginEnabled == true ? "✓ Launch at login" : "Launch at login"), action: store.launchAtLogin)
@@ -224,6 +257,25 @@ func compact(_ n: Int) -> String {
     if n >= 1_000 { return String(format: "%.1fK", Double(n) / 1_000) }
     return String(n)
 }
+private struct UpdateNotice: View {
+    @ObservedObject var checker: UpdateChecker
+    var body: some View {
+        if let update = checker.available {
+            Link(destination: update.url) {
+                HStack(spacing: 3) {
+                    Text("v\(update.version) available")
+                    Image(systemName: "arrow.up.right").font(.system(size: 9))
+                }
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(Agent.codex.tint)
+            .fixedSize()
+            .help("Open the new AgentsPanel release on GitHub")
+            .accessibilityLabel("AgentsPanel version \(update.version) available. Open release on GitHub.")
+        }
+    }
+}
+
 func resetText(_ date: Date?, now: Date) -> String {
     guard let date else { return "Reset time unavailable" }
     let seconds = Int(date.timeIntervalSince(now))
@@ -267,7 +319,9 @@ func resetText(_ date: Date?, now: Date) -> String {
     @MainActor static func main() {
         let app = NSApplication.shared
         if let index = CommandLine.arguments.firstIndex(of: "--render-preview"), CommandLine.arguments.count > index + 1 {
-            let store = Store()
+            let previewUpdate: AppUpdate? = CommandLine.arguments.contains("--update-preview") ? AppUpdate(tag: "v1.0.10") : nil
+            let store = Store(updates: UpdateChecker(fetch: { previewUpdate }))
+            Task { await store.updates.checkIfDue() }
             let agent: Agent = CommandLine.arguments.contains("--claude") ? .claude : .codex
             store.selected = agent
             store.subscriptions[agent] = Subscription(plan: "Pro · Preview data", windows: [UsageWindow(name: "5-hour session", usedPercent: 28, resetsAt: Date().addingTimeInterval(8400)), UsageWindow(name: "Weekly", usedPercent: 63, resetsAt: Date().addingTimeInterval(350000))], updatedAt: Date(), source: "Preview")
