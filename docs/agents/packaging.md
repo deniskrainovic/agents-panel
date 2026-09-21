@@ -2,6 +2,12 @@
 
 Read when changing `build.sh`, bundle metadata, signing, deliverables, or the README.
 
+## Version and release automation
+
+- `version.json` is the only source of app version and build number. Use `python3 scripts/version.py --set X.Y.Z` to increase both; do not hardcode versions in `build.sh`.
+- Version-tag pushes (`vX.Y.Z`) test and build both architectures, verify bundled metadata, then publish a release with both ZIPs and checksums. Branch pushes only run CI.
+- Tag and app version must match. Never replace published assets or move a release tag. See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the release commands and failed-draft recovery.
+
 ## App bundle
 
 - `build.sh` compiles the app and icon generator, packages the bundle, and verifies its signature. Fix packaging in this script rather than hand-editing only a generated bundle.

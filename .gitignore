@@ -1,4 +1,5 @@
 .build/
+.agents/skills/
 .DS_Store
 .swiftpm/
 *.xcuserstate

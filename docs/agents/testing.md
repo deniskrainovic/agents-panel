@@ -10,6 +10,7 @@ Run from the project root:
 | --- | --- |
 | Provider or history parsing | `./test.sh` |
 | Rendering or responsiveness | `./test.sh --ui` and the relevant manual interaction |
+| Release metadata or pipeline | `python3 Tests/VersionTests.py`, workflow lint, and a build with metadata inspection |
 | App packaging or icons | `./build.sh`, then inspect the built app |
 | Documentation only | Check links and referenced files; no app rebuild needed |
 

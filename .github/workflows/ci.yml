@@ -1,7 +1,9 @@
-name: Test and build
+name: Test, build, and release
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -10,7 +12,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   test-and-build:
@@ -39,6 +41,18 @@ jobs:
           swift --version
           python3 --version
 
+      - name: Validate release metadata
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 Tests/VersionTests.py
+          if [ "$REF_TYPE" = "tag" ]; then
+            python3 scripts/version.py --tag "$REF_NAME"
+          else
+            python3 scripts/version.py
+          fi
+
       - name: Run fixture and state tests
         run: ./test.sh
 
@@ -50,6 +64,8 @@ jobs:
           BUILD_ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p "$RUNNER_TEMP/artifacts"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' ../AgentsPanel.app/Contents/Info.plist)" = "$(python3 scripts/version.py)"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' ../AgentsPanel.app/Contents/Info.plist)" = "$(python3 scripts/version.py --field build)"
           lipo ../AgentsPanel.app/Contents/MacOS/AgentsPanel -verify_arch "$BUILD_ARCH"
           ditto -c -k --sequesterRsrc --keepParent ../AgentsPanel.app "$RUNNER_TEMP/artifacts/AgentsPanel-macos-$BUILD_ARCH.zip"
 
@@ -61,3 +77,36 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  release:
+    name: Publish release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Download tested builds
+        run: |
+          gh run download "$RUN_ID" --name AgentsPanel-macos-arm64 --dir assets
+          gh run download "$RUN_ID" --name AgentsPanel-macos-x86_64 --dir assets
+          test -s assets/AgentsPanel-macos-arm64.zip
+          test -s assets/AgentsPanel-macos-x86_64.zip
+          cd assets
+          sha256sum AgentsPanel-macos-*.zip > SHA256SUMS.txt
+
+      - name: Create release with both apps
+        run: |
+          gh release create "$RELEASE_TAG" \
+            assets/AgentsPanel-macos-arm64.zip \
+            assets/AgentsPanel-macos-x86_64.zip \
+            assets/SHA256SUMS.txt \
+            --verify-tag --draft --title "$RELEASE_TAG" --generate-notes
+          gh release edit "$RELEASE_TAG" --draft=false
